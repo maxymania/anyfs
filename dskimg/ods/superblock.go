@@ -21,42 +21,40 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
-package dskimg
+package ods
 
-import "io"
+import "encoding/binary"
+import "github.com/maxymania/anyfs/dskimg"
 
-type FixedIO struct{
-	Buffer []byte
-	Pos    int
+const Superblock_MagicNumber = 0x19771025
+
+type Superblock struct{
+	MagicNumber uint32
+	BlockSize   uint32
+	DiskSerial  uint64
+	Block_Len   uint64
+	Bitmap_BLK  uint64
+	Bitmap_LEN  uint64
+	FirstMFT    uint64
 }
-func (f* FixedIO) ReadIndex(i int64,absr io.ReaderAt) error {
-	n,e := absr.ReadAt(f.Buffer,int64(len(f.Buffer))*i)
-	if len(f.Buffer)==n { e = nil }
-	f.Pos = 0
+
+func (sb *Superblock) LoadSuperblock(i int64,rwa dskimg.IoReaderWriterAt) error{
+	fio := &dskimg.FixedIO{make([]byte,256),0}
+	_,e := rwa.ReadAt(fio.Buffer,i)
+	if e!=nil { return e }
+	return binary.Read(fio,binary.BigEndian,sb)
+}
+func (sb *Superblock) StoreSuperblock(i int64,rwa dskimg.IoReaderWriterAt) error{
+	fio := &dskimg.FixedIO{make([]byte,256),0}
+	e := binary.Write(fio,binary.BigEndian,sb)
+	if e!=nil { return e }
+	_,e = rwa.WriteAt(fio.Buffer,i)
 	return e
 }
-func (f* FixedIO) WriteIndex(i int64,absr io.WriterAt) error {
-	n,e := absr.WriteAt(f.Buffer,int64(len(f.Buffer))*i)
-	if len(f.Buffer)==n { e = nil }
-	f.Pos = 0
-	return e
+func (sb *Superblock) Offset(i uint64) int64 {
+	return int64(i*uint64(sb.BlockSize))
 }
-func (f* FixedIO) Write(p []byte) (n int, err error) {
-	b := f.Pos
-	e := b+len(p)
-	if e>len(f.Buffer) { err = io.EOF; e = len(f.Buffer) }
-	n = e-b
-	copy(p[:n],f.Buffer[b:b])
-	f.Pos = e
-	return
-}
-func (f* FixedIO) Read(p []byte) (n int, err error) {
-	b := f.Pos
-	e := b+len(p)
-	if e>len(f.Buffer) { err = io.EOF; e = len(f.Buffer) }
-	n = e-b
-	copy(p[:n],f.Buffer[b:b])
-	f.Pos = e
-	return
+func (sb *Superblock) Length(i uint64) int64 {
+	return int64(i*uint64(sb.BlockSize))
 }
 

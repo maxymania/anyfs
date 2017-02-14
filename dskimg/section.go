@@ -25,38 +25,50 @@ package dskimg
 
 import "io"
 
-type FixedIO struct{
-	Buffer []byte
-	Pos    int
-}
-func (f* FixedIO) ReadIndex(i int64,absr io.ReaderAt) error {
-	n,e := absr.ReadAt(f.Buffer,int64(len(f.Buffer))*i)
-	if len(f.Buffer)==n { e = nil }
-	f.Pos = 0
-	return e
-}
-func (f* FixedIO) WriteIndex(i int64,absr io.WriterAt) error {
-	n,e := absr.WriteAt(f.Buffer,int64(len(f.Buffer))*i)
-	if len(f.Buffer)==n { e = nil }
-	f.Pos = 0
-	return e
-}
-func (f* FixedIO) Write(p []byte) (n int, err error) {
-	b := f.Pos
-	e := b+len(p)
-	if e>len(f.Buffer) { err = io.EOF; e = len(f.Buffer) }
-	n = e-b
-	copy(p[:n],f.Buffer[b:b])
-	f.Pos = e
-	return
-}
-func (f* FixedIO) Read(p []byte) (n int, err error) {
-	b := f.Pos
-	e := b+len(p)
-	if e>len(f.Buffer) { err = io.EOF; e = len(f.Buffer) }
-	n = e-b
-	copy(p[:n],f.Buffer[b:b])
-	f.Pos = e
-	return
+type IoReaderWriterAt interface{
+	io.ReaderAt
+	io.WriterAt
 }
 
+type SectionIo struct{
+	rwa IoReaderWriterAt
+	base int64
+	lngt int64
+}
+
+func NewSectionIo(rwa IoReaderWriterAt, base int64, length int64) *SectionIo { return &SectionIo{rwa,base,length} }
+
+func (s *SectionIo) Overwrite(buf []byte) {
+	z := s.Size()
+	p := int64(0)
+	n := int64(len(buf))
+	for p<z {
+		s.WriteAt(buf,p)
+		p += n
+	}
+}
+func (s *SectionIo) WriteAt(p []byte, off int64) (n int, err error) {
+	if off<0 { return 0, io.EOF }
+	if off>=s.lngt { return 0,io.EOF }
+	
+	if max := s.lngt-off; max<int64(len(p)) {
+		n,err = s.rwa.WriteAt(p[:int(max)],off+s.base)
+		if err==nil { err = io.EOF }
+	}else{
+		n,err = s.rwa.WriteAt(p,off+s.base)
+	}
+	return
+}
+func (s *SectionIo) ReadAt(p []byte, off int64) (n int, err error) {
+	if off<0 { return 0, io.EOF }
+	if off>=s.lngt { return 0,io.EOF }
+	
+	if max := s.lngt-off; max<int64(len(p)) {
+		n,err = s.rwa.ReadAt(p[:int(max)],off+s.base)
+		if err==nil { err = io.EOF }
+	}else{
+		n,err = s.rwa.ReadAt(p,off+s.base)
+	}
+	return
+}
+func (s *SectionIo) Size() int64 { return s.lngt }

@@ -88,11 +88,13 @@ func (r *BitRegion) Apply(buf []byte,begin, end uint64,rf RangeFunc,write bool) 
 		end = (uint64(n)<<3)|7
 	}
 	n2,e := r.Image.ReadAt(buf,p)
+	if n2>=len(buf) { e = nil }
 	if e!=nil { return begin,e }
 	if int64(n2)<n { buf = buf[:n2] }
 	res := rf(buf,begin-off,end-off)+off
 	if write {
-		_,e := r.Image.WriteAt(buf,p)
+		n2,e := r.Image.WriteAt(buf,p)
+		if n2>=len(buf) { e = nil }
 		return res,e
 	}
 	return res,nil
