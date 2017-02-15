@@ -79,24 +79,26 @@ type BitRegion struct{
 }
 func (r *BitRegion) Apply(buf []byte,begin, end uint64,rf RangeFunc,write bool) (uint64,error) {
 	p := int64(begin>>3)
-	n := int64(end>>3)+1
+	n := int64((end+7)>>3)+1
+	pn := n-p
 	off := uint64(p)<<3
-	if int64(len(buf))>n {
-		buf = buf[:int(n)]
-	} else if int64(len(buf))<n {
-		n = int64(len(buf))
-		end = (uint64(n)<<3)|7
+	if int64(len(buf))>pn {
+		buf = buf[:int(pn)]
+	} else if int64(len(buf))<pn {
+		n = p+int64(len(buf))
+		nen := (uint64(n)<<3)
+		if nen<end { end = nen }
 	}
 	n2,e := r.Image.ReadAt(buf,p)
 	if n2>=len(buf) { e = nil }
 	if e!=nil { return begin,e }
 	if int64(n2)<n { buf = buf[:n2] }
-	res := rf(buf,begin-off,end-off)+off
+	res := rf(buf,begin-off,end-off)
 	if write {
 		n2,e := r.Image.WriteAt(buf,p)
 		if n2>=len(buf) { e = nil }
-		return res,e
+		return res+off,e
 	}
-	return res,nil
+	return res+off,nil
 }
 

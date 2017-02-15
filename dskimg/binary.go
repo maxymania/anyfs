@@ -46,7 +46,7 @@ func (f* FixedIO) Write(p []byte) (n int, err error) {
 	e := b+len(p)
 	if e>len(f.Buffer) { err = io.EOF; e = len(f.Buffer) }
 	n = e-b
-	copy(p[:n],f.Buffer[b:b])
+	copy(f.Buffer[b:],p[:n])
 	f.Pos = e
 	return
 }
@@ -55,7 +55,7 @@ func (f* FixedIO) Read(p []byte) (n int, err error) {
 	e := b+len(p)
 	if e>len(f.Buffer) { err = io.EOF; e = len(f.Buffer) }
 	n = e-b
-	copy(p[:n],f.Buffer[b:b])
+	copy(p[:n],f.Buffer[b:])
 	f.Pos = e
 	return
 }

@@ -25,11 +25,19 @@ package fs1
 
 import "os"
 
-//import "encoding/binary"
-
 import "github.com/maxymania/anyfs/dskimg"
 import "github.com/maxymania/anyfs/dskimg/ods"
 import "github.com/maxymania/anyfs/dskimg/bitmap"
+import "errors"
+import "sync"
+
+var badmz = errors.New("Bad Magic number")
+
+var oor = errors.New("Out of Resources")
+
+const (
+	FS_SPECIAL_ROOT = 1+iota
+)
 
 type MkfsInfo struct{
 	BlockSize  uint32
@@ -48,7 +56,10 @@ type FileSystem struct{
 	Device *os.File
 	SB     *ods.Superblock
 	MMFT    ods.MMFT
-	BitMap bitmap.BitRegion
+	MFTLck  sync.Mutex
+	BitMap  bitmap.BitRegion
+	BMLck   sync.Mutex
+	Temp    uint32
 }
 
 func (f *FileSystem) Mkfs(i int64, mf *MkfsInfo) error {
@@ -86,25 +97,72 @@ func (f *FileSystem) Mkfs(i int64, mf *MkfsInfo) error {
 	f.MMFT.Init()
 	f.MMFT.Set(mft)
 	
-	f.SB.StoreSuperblock(i,f.Device)
-	return nil
+	f.Temp = mft.Head.MFT_ID
+	
+	{
+		mfte := f.MMFT.CreateEntry(f.Temp,FS_SPECIAL_ROOT)
+		mfte.FileType = ods.FT_DIR
+		
+		e := f.MMFT.PutEntry(mfte)
+		if e!=nil { return e }
+	}
+	
+	return f.SB.StoreSuperblock(i,f.Device)
 }
 func (f *FileSystem) LoadFileSystem(i int64) error {
 	f.SB = new(ods.Superblock)
 	e := f.SB.LoadSuperblock(i,f.Device)
 	if e!=nil { return e }
+	if f.SB.MagicNumber != ods.Superblock_MagicNumber { return badmz }
 	f.BitMap.Image = dskimg.NewSectionIo(f.Device,f.SB.Offset(f.SB.Bitmap_BLK),f.SB.Length(f.SB.Bitmap_LEN))
 	
 	img := dskimg.NewSectionIo(f.Device,f.SB.Offset(f.SB.FirstMFT),f.SB.Length(1))
 	mft,e := ods.NewMFT(img,f.SB.BlockSize)
 	if e!=nil { return e }
 	
-	/* XXX: This is a hack! */
-	*img = *dskimg.NewSectionIo(f.Device,f.SB.Offset(f.SB.FirstMFT),f.SB.Length(uint64(mft.Head.Num_BLK)))
+	img.SetSectionSize(f.SB.Length(uint64(mft.Head.Num_BLK)))
 	
 	f.MMFT.Init()
 	f.MMFT.Set(mft)
 	
+	f.Temp = mft.Head.MFT_ID
+	
 	return nil
 }
+
+// Get file.
+func (f *FileSystem) GetFile(ii, i uint32) *File {
+	return &File{f,ii,i}
+}
+
+// Get Root directory of this FS.
+func (f *FileSystem) GetRootDir() *File {
+	return &File{f,f.Temp,FS_SPECIAL_ROOT}
+}
+
+/*
+ * Creates a new File in filesystem.
+ * 'ft' must be one of FT_FILE, FT_DIR, FT_FIFO
+ */
+func (f *FileSystem) CreateFile(ft uint8) (*File,error) {
+	f.MFTLck.Lock()
+	defer f.MFTLck.Unlock()
+	retries := 32
+	id,ok := f.MMFT.RandomGet()
+	if !ok { return nil,oor }
+	mfte,e := f.MMFT.Allocate(id)
+	for ods.MFT_IsAllocFail(e) {
+		if retries<1 { return nil,e }
+		retries--
+		id,ok = f.MMFT.RandomGet()
+		if !ok { return nil,oor }
+		mfte,e = f.MMFT.Allocate(id)
+	}
+	if e!=nil { return nil,e }
+	mfte.FileType = ft
+	e = f.MMFT.PutEntry(mfte)
+	if e!=nil { return nil,e }
+	return &File{f,mfte.File_MFT,mfte.File_IDX},nil
+}
+
 

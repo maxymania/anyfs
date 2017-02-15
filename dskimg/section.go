@@ -47,6 +47,7 @@ func (s *SectionIo) Overwrite(buf []byte) {
 		p += n
 	}
 }
+func (s *SectionIo) SetSectionSize(length int64) { s.lngt = length }
 func (s *SectionIo) WriteAt(p []byte, off int64) (n int, err error) {
 	if off<0 { return 0, io.EOF }
 	if off>=s.lngt { return 0,io.EOF }
