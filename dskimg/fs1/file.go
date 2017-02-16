@@ -308,6 +308,9 @@ func (f *File) WriteAt(p []byte, off int64) (n int, err error) {
 func (f *File) AsDirectory() (*ods.Directory,error) {
 	return ods.NewDirectory(&AutoGrowingFile{f},int(f.FS.SB.DirSegSize))
 }
+func (f *File) AsDirectoryLite() *ods.Directory {
+	return ods.NewDirectoryLite(&AutoGrowingFile{f},int(f.FS.SB.DirSegSize))
+}
 
 
 type AutoGrowingFile struct{

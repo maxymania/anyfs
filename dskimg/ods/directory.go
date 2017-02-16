@@ -147,6 +147,15 @@ func NewDirectory(file RAS,segsize int) (*Directory,error){
 	return d,nil
 }
 
+// Works like NewDirectory, but creates no cache.
+// Only ReadDir(), WriteDir(), ListUp() and IsEmpty() might be used.
+func NewDirectoryLite(file RAS,segsize int) *Directory{
+	d := new(Directory)
+	d.File  = file
+	d.Buf   = &dskimg.FixedIO{make([]byte,segsize),0}
+	d.Segsz = segsize
+	return d
+}
 
 func (d *Directory) ReadDir(i int64) ([]DirectoryEntry,error) {
 	e := d.Buf.ReadIndex(i,d.File)
@@ -229,6 +238,15 @@ func (d *Directory) ListUp(dest chan <- DirectoryEntry) {
 		if e!=nil { break }
 		for _,o := range arr { dest <- o }
 	}
+}
+func (d* Directory) IsEmpty() bool{
+	for i:=int64(0); true; i++ {
+		arr,e := d.ReadDir(i)
+		if e!=nil { return true }
+		if len(arr)>0 { return false }
+	}
+	panic("unreachable")
+	
 }
 
 
