@@ -29,6 +29,7 @@ import "github.com/hanwen/go-fuse/fuse/nodefs"
 
 import "github.com/maxymania/anyfs/dskimg/fs1"
 import "github.com/maxymania/anyfs/dskimg/ods"
+//import "time"
 
 import "syscall"
 
@@ -166,7 +167,7 @@ func (d *DirNode) Create(name string, flags uint32, mode uint32, context *fuse.C
 	}
 	return fobj,ino.NewChild(name,dir,nd),fuse.OK
 }
-func (d *DirNode) Unlink(name string, context *fuse.Context) (fuse.Status) {
+func (d *DirNode) Unlink(name string, context *fuse.Context) fuse.Status {
 	ino := d.Inode()
 	d.Lock.Lock()
 	defer d.Lock.Unlock()
@@ -181,11 +182,14 @@ func (d *DirNode) Unlink(name string, context *fuse.Context) (fuse.Status) {
 	if err==nil { return fuse.ENOENT }
 	ino.RmChild(name)
 	
-	d.Backing.FS.Decrement(ent.File_MFT,ent.File_IDX)
+	mfte,e := d.Backing.FS.MMFT.GetEntry(ent.File_MFT,ent.File_IDX)
+	if e==nil && mfte.Cookie==ent.Cookie {
+		d.Backing.FS.Decrement(ent.File_MFT,ent.File_IDX)
+	}
 	
 	return fuse.OK
 }
-func (d *DirNode) Rmdir(name string, context *fuse.Context) (fuse.Status) {
+func (d *DirNode) Rmdir(name string, context *fuse.Context) fuse.Status {
 	ino := d.Inode()
 	d.Lock.Lock()
 	defer d.Lock.Unlock()
@@ -202,9 +206,104 @@ func (d *DirNode) Rmdir(name string, context *fuse.Context) (fuse.Status) {
 	_,err = d.Dir.Delete(name)
 	if err==nil { return fuse.ENOENT }
 	
-	d.Backing.FS.Decrement(ent.File_MFT,ent.File_IDX)
+	mfte,e := d.Backing.FS.MMFT.GetEntry(ent.File_MFT,ent.File_IDX)
+	if e==nil && mfte.Cookie==ent.Cookie {
+		d.Backing.FS.Decrement(ent.File_MFT,ent.File_IDX)
+	}
 	
 	return fuse.OK
+}
+func (d *DirNode) rename_in(oldName string, newName string, context *fuse.Context) fuse.Status {
+	ino := d.Inode()
+	d.Lock.Lock()
+	defer d.Lock.Unlock()
+	{
+		_,oent,oerr := d.Dir.Search(newName)
+		if oerr!=nil && oent.FileType == ods.FT_DIR {
+			return fuse.Status(syscall.EISDIR)
+		}
+	}
+	_,ment,merr := d.Dir.Search(oldName)
+	if merr==nil {
+		oent,oerr := d.Dir.Delete(newName)
+		ino.RmChild(newName)
+		d.Dir.Add(ods.DirectoryEntry{newName,ment})
+		on := ino.RmChild(oldName)
+		if on!=nil { ino.AddChild(newName,on) }
+		if oerr!=nil {
+			mfte,e := d.Backing.FS.MMFT.GetEntry(oent.File_MFT,oent.File_IDX)
+			if e==nil && mfte.Cookie==oent.Cookie {
+				d.Backing.FS.Decrement(oent.File_MFT,oent.File_IDX)
+			}
+		}
+		d.Dir.Delete(oldName)
+		return fuse.OK
+	}
+	return fuse.ENOENT
+}
+func (d *DirNode) move_into(name string,ent ods.DirectoryEntryValue,nch *nodefs.Inode, context *fuse.Context) fuse.Status {
+	ino := d.Inode()
+	d.Lock.Lock()
+	defer d.Lock.Unlock()
+	_,oent,oerr := d.Dir.Search(name)
+	if oerr!=nil && oent.FileType == ods.FT_DIR {
+		return fuse.Status(syscall.EISDIR)
+	}
+	oent,oerr = d.Dir.Delete(name)
+	ino.RmChild(name)
+	d.Dir.Add(ods.DirectoryEntry{name,ent})
+	if nch!=nil { ino.AddChild(name,nch) }
+	if oerr!=nil {
+		mfte,e := d.Backing.FS.MMFT.GetEntry(oent.File_MFT,oent.File_IDX)
+		if e==nil && mfte.Cookie==oent.Cookie {
+			d.Backing.FS.Decrement(oent.File_MFT,oent.File_IDX)
+		}
+	}
+	return fuse.OK
+}
+func (d *DirNode) move_out_1(name string) (nch *nodefs.Inode,ent ods.DirectoryEntryValue,err error) {
+	pn := new(ModeNode)
+	pn.Node = nodefs.NewDefaultNode()
+	pn.Attr.Mode = fuse.S_IFDIR | 0777
+	ino := d.Inode()
+	d.Lock.Lock()
+	defer d.Lock.Unlock()
+	
+	_,ent,err = d.Dir.Search(name)
+	if err!=nil { return }
+	nch = ino.RmChild(name)
+	ino.NewChild(name,true,pn)
+	return
+}
+func (d *DirNode) move_out_2(name string) (err error) {
+	ino := d.Inode()
+	d.Lock.Lock()
+	defer d.Lock.Unlock()
+	_,err = d.Dir.Delete(name)
+	if err!=nil { ino.RmChild(name) }
+	return
+}
+func (d *DirNode) move_out_rollback(name string,nch *nodefs.Inode) {
+	ino := d.Inode()
+	d.Lock.Lock()
+	defer d.Lock.Unlock()
+	ino.RmChild(name)
+	ino.AddChild(name,nch)
+}
+func (d *DirNode) Rename(oldName string, newParent nodefs.Node, newName string, context *fuse.Context) fuse.Status {
+	target,ok := newParent.(*DirNode)
+	if !ok { return fuse.EINVAL }
+	if d==target { return d.rename_in(oldName,newName,context) }
+	ino,ent,err := d.move_out_1(oldName)
+	if err!=nil { return fuse.EIO }
+	st := target.move_into(newName,ent,ino,context)
+	if st.Ok() {
+		d.move_out_2(oldName)
+		return fuse.OK
+	}else{
+		d.move_out_rollback(oldName,ino)
+		return st
+	}
 }
 
 

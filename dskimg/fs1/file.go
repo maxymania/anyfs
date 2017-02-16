@@ -157,7 +157,7 @@ func (f *File) FrangesLL(pos,end int64) ([]*FileRange,error){
 	
 	
 	ppart := pos%sbz
-	epart := (sbz-(pos%sbz))%sbz
+	epart := (sbz-(end%sbz))%sbz
 	
 	pblk := uint64(pos)/bz
 	eblk := (uint64(end)+bz-1)/bz

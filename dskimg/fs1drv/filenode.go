@@ -30,6 +30,8 @@ import "github.com/hanwen/go-fuse/fuse/nodefs"
 import "github.com/maxymania/anyfs/dskimg/fs1"
 import "os"
 
+import "fmt"
+
 const ANYWRITE = uint32(os.O_WRONLY | os.O_RDWR | os.O_APPEND)
 
 func read(f* fs1.AutoGrowingFile,dest []byte, off int64) (fuse.ReadResult, fuse.Status) {
@@ -59,7 +61,7 @@ func (f *FileNode) GetAttr(out *fuse.Attr, file nodefs.File, context *fuse.Conte
 	if file!=nil { return f.Node.GetAttr(out, file, context) }
 	mfte,e := f.Backing.GetMFTE()
 	if e!=nil { return fuse.EIO }
-	out.Mode = fuse.S_IFREG | 0777
+	out.Mode = fuse.S_IFREG | 0666
 	out.Size = uint64(mfte.FileSize)
 	return fuse.OK
 }
@@ -70,12 +72,15 @@ func (f *FileNode) Open(flags uint32, context *fuse.Context) (nodefs.File, fuse.
 	var fobj nodefs.File = &FileFile{nodefs.NewDefaultFile(),f.Backing}
 	if (flags&ANYWRITE)==0 {
 		fobj = nodefs.NewReadOnlyFile(fobj)
+		//fobj = nodefs.NewDataFile([]byte("Test1\n"))
 	}
 	return fobj,fuse.OK
 }
 func (f *FileNode) Access(mode uint32, context *fuse.Context) (fuse.Status) {
 	return fuse.OK
 }
+
+
 func (f *FileNode) Read(file nodefs.File, dest []byte, off int64, context *fuse.Context) (fuse.ReadResult, fuse.Status) {
 	if file!=nil { return f.Node.Read(file,dest,off,context) }
 	return read(f.Backing,dest,off)
@@ -84,11 +89,19 @@ func (f *FileNode) Write(file nodefs.File, data []byte, off int64, context *fuse
 	if file!=nil { return f.Node.Write(file,data,off,context) }
 	return write(f.Backing,data,off)
 }
-
+func (f *FileNode) Truncate(file nodefs.File, size uint64, context *fuse.Context) (fuse.Status) {
+	if file!=nil { return f.Node.Truncate(file,size,context) }
+	e := f.Backing.Resize(int64(size))
+	if e!=nil { return fuse.EIO }
+	return fuse.OK
+}
 
 type FileFile struct{
 	nodefs.File
 	Backing *fs1.AutoGrowingFile
+}
+func (f* FileFile) String() string {
+	return fmt.Sprint("FileObject(",f.Backing.MFT,",",f.Backing.FID,")")
 }
 func (f* FileFile) Read(dest []byte, off int64) (fuse.ReadResult, fuse.Status) {
 	return read(f.Backing,dest,off)
@@ -104,9 +117,11 @@ func (f* FileFile) Truncate(size uint64) fuse.Status {
 func (f* FileFile) GetAttr(out *fuse.Attr) fuse.Status {
 	mfte,e := f.Backing.GetMFTE()
 	if e!=nil { return fuse.EIO }
-	out.Mode = fuse.S_IFDIR | 0777
+	out.Mode = fuse.S_IFREG | 0666
 	out.Size = uint64(mfte.FileSize)
 	return fuse.OK
 }
+func (f *FileFile) Flush() fuse.Status { return fuse.OK }
+func (f *FileFile) Fsync(flags int) fuse.Status { return fuse.OK }
 
 

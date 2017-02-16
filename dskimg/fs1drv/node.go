@@ -53,11 +53,13 @@ func opennode(fs *fs1.FileSystem, ent ods.DirectoryEntryValue) (bool,nodefs.Node
 		mm := new(ModeNode)
 		mm.Node = nodefs.NewDefaultNode()
 		mm.Attr.Mode = fuse.S_IFIFO | 0666
+		//attr_now(&(mm.Attr))
 		return true,mm,fuse.OK
 		}
 	}
 	return false,nil,fuse.EIO
 }
+
 
 type ModeNode struct{
 	nodefs.Node
