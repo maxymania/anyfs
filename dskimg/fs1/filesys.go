@@ -189,6 +189,8 @@ func (f *FileSystem) shred(ii,i uint32) error {
 	return err
 }
 func (f *FileSystem) Decrement(ii,i uint32) error{
+	f.MFTLck.Lock()
+	defer f.MFTLck.Unlock()
 	mfte,e := f.MMFT.GetEntry(ii,i)
 	if e!=nil { return e }
 	mfte.RefCount--
@@ -198,9 +200,13 @@ func (f *FileSystem) Decrement(ii,i uint32) error{
 	return f.shred(ii,i)
 }
 func (f *FileSystem) Increment(ii,i uint32) error{
+	f.MFTLck.Lock()
+	defer f.MFTLck.Unlock()
 	mfte,e := f.MMFT.GetEntry(ii,i)
 	if e!=nil { return e }
 	mfte.RefCount++
 	e = f.MMFT.PutEntry(mfte)
 	return e
 }
+
+

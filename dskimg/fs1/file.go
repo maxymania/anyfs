@@ -176,6 +176,8 @@ func (f *File) FrangesLL(pos,end int64) ([]*FileRange,error){
 
 // Purge file segments, that are not longer needed. (truncate)
 func (f *File) ShrinkDsk() error {
+	f.FS.MFTLck.Lock()
+	defer f.FS.MFTLck.Unlock()
 	mfte,e := f.GetMFTE()
 	if e!=nil { return e }
 	
