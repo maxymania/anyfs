@@ -59,7 +59,7 @@ func (f *FileNode) GetAttr(out *fuse.Attr, file nodefs.File, context *fuse.Conte
 	if file!=nil { return f.Node.GetAttr(out, file, context) }
 	mfte,e := f.Backing.GetMFTE()
 	if e!=nil { return fuse.EIO }
-	out.Mode = fuse.S_IFDIR | 0777
+	out.Mode = fuse.S_IFREG | 0777
 	out.Size = uint64(mfte.FileSize)
 	return fuse.OK
 }
