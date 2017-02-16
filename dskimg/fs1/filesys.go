@@ -30,6 +30,7 @@ import "github.com/maxymania/anyfs/dskimg/ods"
 import "github.com/maxymania/anyfs/dskimg/bitmap"
 import "errors"
 import "sync"
+import "math/rand"
 
 var badmz = errors.New("Bad Magic number")
 
@@ -42,6 +43,7 @@ const (
 type MkfsInfo struct{
 	BlockSize  uint32
 	MftBlocks  uint32
+	DirSegSize uint32
 }
 func (mf *MkfsInfo) bitmap(i int64, blknum uint64) (blk,lng uint64){
 	blk  = uint64(i+256)+uint64(mf.BlockSize)-1
@@ -68,9 +70,16 @@ func (f *FileSystem) Mkfs(i int64, mf *MkfsInfo) error {
 	f.SB = new(ods.Superblock)
 	f.SB.MagicNumber = ods.Superblock_MagicNumber
 	f.SB.BlockSize   = mf.BlockSize
-	f.SB.DiskSerial  = 12345
+	f.SB.DiskSerial  = uint64(rand.Int63())
 	f.SB.Block_Len   = uint64(fif.Size())/uint64(mf.BlockSize)
 	f.SB.Bitmap_BLK,f.SB.Bitmap_LEN = mf.bitmap(i,f.SB.Block_Len)
+	f.SB.DirSegSize  = mf.BlockSize
+	if mf.DirSegSize!=0 { f.SB.DirSegSize = mf.DirSegSize }
+	if f.SB.DirSegSize < (1<<12) { 
+		f.SB.DirSegSize = (1<<12)
+	} else if f.SB.DirSegSize > (1<<16) { 
+		f.SB.DirSegSize = (1<<16)
+	}
 	
 	img := dskimg.NewSectionIo(f.Device,f.SB.Offset(f.SB.Bitmap_BLK),f.SB.Length(f.SB.Bitmap_LEN))
 	buffer := make([]byte,int(mf.BlockSize))
@@ -87,7 +96,7 @@ func (f *FileSystem) Mkfs(i int64, mf *MkfsInfo) error {
 	
 	mft,e := ods.NewMFT(dskimg.NewSectionIo(f.Device,f.SB.Offset(endbm),f.SB.Length(mftblocks)),mf.BlockSize)
 	if e!=nil { return e }
-	mft.Head.MFT_ID  = 1234
+	mft.Head.MFT_ID  = rand.Uint32()
 	mft.Head.Num_BLK = mf.MftBlocks
 	mft.Head.NextMFT = 0
 	e = mft.SaveMFTH()
@@ -102,6 +111,7 @@ func (f *FileSystem) Mkfs(i int64, mf *MkfsInfo) error {
 	{
 		mfte := f.MMFT.CreateEntry(f.Temp,FS_SPECIAL_ROOT)
 		mfte.FileType = ods.FT_DIR
+		mfte.RefCount = 10000000
 		
 		e := f.MMFT.PutEntry(mfte)
 		if e!=nil { return e }
@@ -160,9 +170,37 @@ func (f *FileSystem) CreateFile(ft uint8) (*File,error) {
 	}
 	if e!=nil { return nil,e }
 	mfte.FileType = ft
+	mfte.Cookie = uint64(rand.Int63())
+	mfte.RefCount = 1
 	e = f.MMFT.PutEntry(mfte)
 	if e!=nil { return nil,e }
 	return &File{f,mfte.File_MFT,mfte.File_IDX},nil
 }
-
-
+func (f *FileSystem) shred(ii,i uint32) error {
+	gec,e := f.MMFT.GetEntryChain(ii,i)
+	if e!=nil { return e }
+	var err error = nil
+	for _,j := range gec.Indeces {
+		mfte,e := f.MMFT.GetEntry(ii,j)
+		if e!=nil { err = e }
+		e = f.FreeMFTE(mfte)
+		if e!=nil { err = e }
+	}
+	return err
+}
+func (f *FileSystem) Decrement(ii,i uint32) error{
+	mfte,e := f.MMFT.GetEntry(ii,i)
+	if e!=nil { return e }
+	mfte.RefCount--
+	e = f.MMFT.PutEntry(mfte)
+	if e!=nil { return e }
+	if mfte.RefCount!=0 { return nil }
+	return f.shred(ii,i)
+}
+func (f *FileSystem) Increment(ii,i uint32) error{
+	mfte,e := f.MMFT.GetEntry(ii,i)
+	if e!=nil { return e }
+	mfte.RefCount++
+	e = f.MMFT.PutEntry(mfte)
+	return e
+}

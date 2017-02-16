@@ -46,6 +46,8 @@ const (
 	FT_FILE = 0xf0+iota
 	FT_DIR
 	FT_FIFO
+	
+	FT_METADATA = 0x30
 )
 
 type MFTH struct{
@@ -67,8 +69,12 @@ type MFTE struct{
 	 * The following fields are only relevant for the head of a chain.
 	 * On other segments of a chain these are to be ignored.
 	 */
-	FileSize  int64
-	FileType  uint8
+	FileSize   int64
+	RefCount   uint32 /* Reference count */
+	Mdf_MFT    uint32 /* Metadata-file MFT */
+	Mdf_IDX    uint32 /* Metadata-file IDX */
+	Mdf_Cookie uint16 /* Metadata-file Cookie (16 Least significant bits of it) */
+	FileType   uint8  /* File Typeflag*/
 }
 
 type MFTE_Chain struct{

@@ -36,6 +36,7 @@ type Superblock struct{
 	Bitmap_BLK  uint64
 	Bitmap_LEN  uint64
 	FirstMFT    uint64
+	DirSegSize  uint32 /* Directory Segment Size */
 }
 
 func (sb *Superblock) LoadSuperblock(i int64,rwa dskimg.IoReaderWriterAt) error{

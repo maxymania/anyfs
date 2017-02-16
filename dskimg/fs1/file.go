@@ -28,7 +28,9 @@ import "io"
 import "github.com/maxymania/anyfs/dskimg/ods"
 import "errors"
 
-var invalidfiles = errors.New("Bas MFT Entry Allocation")
+var invalidfiles = errors.New("Bad MFT Entry Allocation")
+
+var EIO = errors.New("IO_ERROR")
 
 type FileRange struct{
 	Device *os.File
@@ -45,6 +47,41 @@ func (f* FileRange) PullTail(i int64) *FileRange {
 	f.Len-=i
 	return f
 }
+func (f* FileRange) ReadObj(p []byte) (n int,err error) {
+	if f.Len<int64(len(p)) { p = p[:f.Len] }
+	n,_ = f.Device.ReadAt(p,f.Pos)
+	if n<len(p) { err = EIO }
+	return
+}
+func (f* FileRange) WriteObj(p []byte) (n int,err error) {
+	if f.Len<int64(len(p)) { p = p[:f.Len] }
+	n,_ = f.Device.WriteAt(p,f.Pos)
+	if n<len(p) { err = EIO }
+	return
+}
+
+
+func ReadFileRanges(rr []*FileRange,p []byte) (n int,err error) {
+	n = 0
+	for _,r := range rr {
+		rn,e := r.ReadObj(p)
+		n+=rn
+		p = p[:rn]
+		if e!=nil { err = e; return }
+	}
+	return n,nil
+}
+func WriteFileRanges(rr []*FileRange,p []byte) (n int,err error) {
+	n = 0
+	for _,r := range rr {
+		rn,e := r.WriteObj(p)
+		n+=rn
+		p = p[:rn]
+		if e!=nil { err = e; return }
+	}
+	return n,nil
+}
+
 
 type FileBlockRange struct {
 	Device *os.File
@@ -130,9 +167,161 @@ func (f *File) FrangesLL(pos,end int64) ([]*FileRange,error){
 	z := make([]*FileRange,len(ff))
 	for i,f := range ff { z[i]=f.FileRange() }
 	
-	z[0].PullHead(ppart)
-	z[len(z)-1].PullTail(epart)
+	if len(z)>0{
+		z[0].PullHead(ppart)
+		z[len(z)-1].PullTail(epart)
+	}
 	return z,nil
+}
+
+// Purge file segments, that are not longer needed. (truncate)
+func (f *File) ShrinkDsk() error {
+	mfte,e := f.GetMFTE()
+	if e!=nil { return e }
+	
+	bz := uint64(f.FS.SB.BlockSize)
+	blks := (uint64(mfte.FileSize)+bz-1)/bz
+	
+	gec,e := f.FS.MMFT.GetEntryChain(f.MFT,f.FID)
+	if e!=nil { return e }
+	
+	if gec.TotalBLK <= blks {
+		return nil
+	}
+	i := len(gec.Indeces)-1
+	
+	for {
+		lb := gec.Off_BLK[i]
+		bmfte,e := f.FS.MMFT.GetEntry(f.MFT,gec.Indeces[i])
+		if e!=nil { return e }
+		if lb >= blks {
+			if i>0 {
+				i--
+				pmfte,e := f.FS.MMFT.GetEntry(f.MFT,gec.Indeces[i])
+				if e!=nil { return e }
+				pmfte.Next_IDX = 0
+				e = f.FS.MMFT.PutEntry(pmfte)
+				if e!=nil { return e }
+				f.FS.FreeMFTE(bmfte)
+				continue
+			}else{
+				f.FS.ClearMFTE(bmfte)
+				break
+			}
+		}else{
+			diff := bmfte.End_BLK-bmfte.Begin_BLK
+			if bmfte.End_BLK<bmfte.Begin_BLK { break }
+			cdif := blks-lb
+			if cdif>=diff { break }
+			oe := bmfte.End_BLK
+			ne := bmfte.Begin_BLK+cdif
+			bmfte.End_BLK = ne
+			e := f.FS.MMFT.PutEntry(bmfte)
+			if e!=nil { return e }
+			f.FS.FreeRangeSync(ne,oe)
+			break
+		}
+	}
+	/* Flush Cache. */
+	f.FS.MMFT.ResetEntryChain(f.MFT,f.FID)
+	return nil
+}
+func (f *File) Grow(size int64) error {
+	return f.sizectl(size,false,true)
+}
+func (f *File) Resize(size int64) error {
+	return f.sizectl(size,true,true)
+}
+func (f *File) sizectl(size int64,shrink, grow bool) error {
+	bz := uint64(f.FS.SB.BlockSize)
+	blks := (uint64(size)+bz-1)/bz
+	mfte,e := f.GetMFTE()
+	if e!=nil { return e }
+	if mfte.FileSize>size { /* Shrink */
+		if !shrink { return nil }
+		mfte.FileSize = size
+		return f.FS.MMFT.PutEntry(mfte)
+	}
+	/* If the file size is not different, do nothing. */
+	if mfte.FileSize==size { return nil }
+	
+	if !grow { return nil }
+	
+	gec,e := f.FS.MMFT.GetEntryChain(f.MFT,f.FID)
+	if e!=nil { return e }
+	if gec.TotalBLK < blks {
+		i := len(gec.Indeces)-1
+		needblk := blks-gec.Off_BLK[i]
+		lmfte,e := f.FS.MMFT.GetEntry(f.MFT,gec.Indeces[i])
+		if e!=nil { return e }
+		e,_ = f.FS.GrowMFTE(lmfte,needblk)
+		if e!=nil { return e }
+		
+		/* Flush Cache. */
+		f.FS.MMFT.ResetEntryChain(f.MFT,f.FID)
+	}
+	
+	/* Refresh entry, to make sure, we don't operate on a stale copy */
+	mfte,e = f.GetMFTE()
+	if e!=nil { return e }
+	
+	if mfte.FileSize==size { return nil } /* Nothing to do */
+	
+	mfte.FileSize = size
+	return f.FS.MMFT.PutEntry(mfte)
+}
+func (f *File) Size() (int64,error) {
+	mfte,e := f.GetMFTE()
+	if e!=nil { return 0,e }
+	return mfte.FileSize,nil
+}
+
+func (f *File) ReadAt(p []byte, off int64) (n int, err error) {
+	lp := len(p)
+	r,e := f.Franges(off,lp)
+	if e!=nil  { return 0,e }
+	n,err = ReadFileRanges(r,p)
+	if n<lp {
+		if err==nil { err = io.EOF }
+	} else {
+		err = nil
+	}
+	return
+}
+
+func (f *File) WriteAt(p []byte, off int64) (n int, err error) {
+	lp := len(p)
+	r,e := f.Franges(off,lp)
+	if e!=nil  { return 0,e }
+	n,err = WriteFileRanges(r,p)
+	if n<lp {
+		if err==nil { err = EIO }
+	} else {
+		err = nil
+	}
+	return
+}
+
+func (f *File) AsDirectory() (*ods.Directory,error) {
+	return ods.NewDirectory(&AutoGrowingFile{f},int(f.FS.SB.DirSegSize))
+}
+
+
+type AutoGrowingFile struct{
+	*File
+}
+func (f *AutoGrowingFile) WriteAt(p []byte, off int64) (n int, err error) {
+	lp := len(p)
+	f.Grow(off+int64(lp))
+	r,e := f.Franges(off,lp)
+	if e!=nil  { return 0,e }
+	n,err = WriteFileRanges(r,p)
+	if n<lp {
+		if err==nil { err = EIO }
+	} else {
+		err = nil
+	}
+	return
 }
 
 

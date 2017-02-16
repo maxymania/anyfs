@@ -44,6 +44,22 @@ type AllocRange struct{
 type fs_job struct{
 	from,to,clear,free AllocRange
 }
+func (f *FileSystem) FreeMFTE(mfte *ods.MFTE) error {
+	blank := new(ods.MFTE)
+	e := f.MMFT.PutEntryLL(mfte.File_MFT,mfte.File_IDX,blank)
+	if e!=nil { return e }
+	_,e = f.FreeRangeSync(mfte.Begin_BLK,mfte.End_BLK)
+	return e
+}
+func (f *FileSystem) ClearMFTE(mfte *ods.MFTE) error {
+	beg,end := mfte.Begin_BLK,mfte.End_BLK
+	mfte.Begin_BLK = 0
+	mfte.End_BLK = 0
+	e := f.MMFT.PutEntry(mfte)
+	if e!=nil { return e }
+	_,e = f.FreeRangeSync(beg,end)
+	return e
+}
 func (f *FileSystem) dojob(job* fs_job) {
 	status := false
 	buf := []byte{}
@@ -65,7 +81,8 @@ func (f *FileSystem) dojob(job* fs_job) {
 	if i<n {
 		f.BMLck.Lock()
 		defer f.BMLck.Unlock()
-		f.BitMap.Apply(buf,i,n,bitmap.FreeRange,true)
+		f.FreeRange(i,n)
+		//f.BitMap.Apply(buf,i,n,bitmap.FreeRange,true)
 	}
 }
 func (f *FileSystem) GrowMFTE(mfte *ods.MFTE, nblocks uint64) (error,bool) {
@@ -166,6 +183,25 @@ func (f *FileSystem) AllocAppend(pos, n uint64) (uint64,error) {
 	buf := make([]byte,int(bl))
 	
 	return f.BitMap.Apply(buf,pos,pos+n,bitmap.AllocRange,true)
+}
+func (f *FileSystem) FreeRangeSync(pos, end uint64) (uint64,error) {
+	f.BMLck.Lock()
+	defer f.BMLck.Unlock()
+	return f.FreeRange(pos,end)
+}
+func (f *FileSystem) FreeRange(pos, end uint64) (uint64,error) {
+	n := end-pos
+	bl := (n+7)>>3
+	bl += 2
+	if bl>(1<<20) { bl = 1<<20 }
+	buf := make([]byte,int(bl))
+	
+	for {
+		np,e := f.BitMap.Apply(buf,pos,end,bitmap.FreeRange,true)
+		if e!=nil { return np,e }
+		pos = np
+	}
+	return pos,nil
 }
 func (f *FileSystem) AllocateRange(n uint64) (*AllocRange,error) {
 	bl := (n+7)>>3
