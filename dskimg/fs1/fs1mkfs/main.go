@@ -95,7 +95,7 @@ func main(){
 	mkfs.MftBlocks /= mkfs.BlockSize
 	fs := new(fs1.FileSystem)
 	fs.Device = f
-	err := fs.Mkfs(*offset,mkfs)
+	err := fs.Mkfs(int64(*offset),mkfs)
 	if err!=nil {
 		fmt.Println("Error: ",err)
 		flag.PrintDefaults()
