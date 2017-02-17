@@ -27,17 +27,11 @@ package fs1
 
 import "github.com/maxymania/anyfs/dskimg/ods"
 import "github.com/maxymania/anyfs/dskimg/bitmap"
+import "github.com/maxymania/anyfs/debug"
 import "errors"
-//import "fmt"
 
 var badalloc = errors.New("No Allocation possible")
 
-/*
-func min64(a,b uint64) uint64 {
-	if a>b { return b }
-	return a
-}
-*/
 
 type AllocRange struct{
 	Begin,End uint64
@@ -89,18 +83,26 @@ func (f *FileSystem) dojob(job* fs_job) {
 }
 func (f *FileSystem) GrowMFTE(mfte *ods.MFTE, nblocks uint64) (error,bool) {
 	j := new(fs_job)
+	debug.Println("GrowMFTE(",nblocks,") {")
+	defer debug.Println("}GrowMFTE")
+	debug.Println(" f.growMFTE...")
 	e,more := f.growMFTE(mfte,nblocks,j)
+	debug.Println(" f.growMFTE(",nblocks,j,") -> ",e,more)
 	f.dojob(j)
 	dirty := false
 	if e!=nil { return e,dirty }
 	for more {
+		debug.Println(" f.addMFTE...")
 		m2,nd,e := f.addMFTE(mfte)
+		debug.Println(" f.addMFTE() -> ",nd,e)
 		dirty = nd || dirty
 		if e!=nil { return e,dirty }
 		nblocks -= (mfte.End_BLK-mfte.Begin_BLK)
 		mfte = m2
 		*j = fs_job{}
+		debug.Println(" f.growMFTE...")
 		e,more = f.growMFTE(mfte,nblocks,j)
+		debug.Println(" f.growMFTE(",nblocks,j,") -> ",e,more)
 		f.dojob(j)
 		if e!=nil { return e,dirty }
 	}
@@ -124,8 +126,9 @@ func (f *FileSystem) growMFTE(mfte *ods.MFTE, nblocks uint64, j* fs_job) (error,
 	f.BMLck.Lock()
 	defer f.BMLck.Unlock()
 	if mfte.Begin_BLK==0 || mfte.Begin_BLK>=mfte.End_BLK {
+		debug.Println("  f.AllocateRange...")
 		ar,e := f.AllocateRange(nblocks)
-		//fmt.Println("Alloc: ",ar)
+		debug.Println("  f.AllocateRange(",nblocks,") -> ",ar,e)
 		// TODO: Handle badalloc
 		if e!=nil { return e,false }
 		mfte.Begin_BLK = ar.Begin
@@ -137,7 +140,9 @@ func (f *FileSystem) growMFTE(mfte *ods.MFTE, nblocks uint64, j* fs_job) (error,
 		diff := mfte.End_BLK-mfte.Begin_BLK
 		if diff>=nblocks { return nil,false } /* Don't grow if not needed. */
 		ddiff := (nblocks-diff)
+		debug.Println("  f.AllocAppend...")
 		ne,e := f.AllocAppend(mfte.End_BLK,ddiff)
+		debug.Println("  f.AllocAppend(",mfte.End_BLK,ddiff,") -> ",ne,e)
 		if e!=nil { return e,false }
 		//fmt.Println("Append: ",&AllocRange{mfte.Begin_BLK,ne})
 		ndiff := (ne-mfte.Begin_BLK)
@@ -150,7 +155,10 @@ func (f *FileSystem) growMFTE(mfte *ods.MFTE, nblocks uint64, j* fs_job) (error,
 		}
 		
 		dndiff := (nblocks-ndiff)
-		ar,e := f.AllocateBiggest(nblocks,ndiff+(dndiff/2))
+		minimum := ndiff+(dndiff/2)
+		debug.Println("  f.AllocateBiggest...")
+		ar,e := f.AllocateBiggest(nblocks,minimum)
+		debug.Println("  f.AllocateBiggest(",nblocks,minimum,") -> ",ar,e)
 		//fmt.Println("Biggest: ",ar)
 		if e==badalloc {
 			j.clear.Begin = mfte.End_BLK
@@ -183,8 +191,13 @@ func (f *FileSystem) AllocAppend(pos, n uint64) (uint64,error) {
 	bl += 2
 	if bl>(1<<20) { bl = 1<<20 }
 	buf := make([]byte,int(bl))
+	end := f.SB.Block_Len
+	posn := pos+n
+	if posn>end { posn = end }
+	if pos>posn { return 0,badalloc }
+	if pos==posn { return pos,nil }
 	
-	return f.BitMap.Apply(buf,pos,pos+n,bitmap.AllocRange,true)
+	return f.BitMap.Apply(buf,pos,posn,bitmap.AllocRange,true)
 }
 func (f *FileSystem) FreeRangeSync(pos, end uint64) (uint64,error) {
 	f.BMLck.Lock()
@@ -201,6 +214,8 @@ func (f *FileSystem) FreeRange(pos, end uint64) (uint64,error) {
 	for {
 		np,e := f.BitMap.Apply(buf,pos,end,bitmap.FreeRange,true)
 		if e!=nil { return np,e }
+		if np>=end { break }
+		if np<=pos { break }
 		pos = np
 	}
 	return pos,nil
@@ -216,12 +231,14 @@ func (f *FileSystem) AllocateRange(n uint64) (*AllocRange,error) {
 	// min64(end,pos+n)
 	
 	for {
+		debug.Println("SkipAllocated(",pos,"...",end,") ...")
 		for {
 			lp,e := f.BitMap.Apply(buf,pos,end,bitmap.ScanSetRange,false)
 			if e!=nil { return nil,e }
 			if lp==pos { break }
 			pos = lp
 		}
+		debug.Println("SkipAllocated(...) -> ",pos,"...",end)
 		goal := pos+n
 		lp,e := f.BitMap.Apply(buf,pos,end,bitmap.ScanRange,false)
 		if goal<=lp {

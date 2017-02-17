@@ -34,12 +34,19 @@ import (
 	
 	"github.com/maxymania/anyfs/dskimg/fs1"
 	"github.com/maxymania/anyfs/dskimg/fs1drv"
+	
+	dbgpkg "github.com/maxymania/anyfs/debug"
 )
+
 
 var debug = flag.Bool("debug", false, "print debugging messages.")
 var image = flag.String("image", "", "The file-system image to be formatted")
 var mount = flag.String("mount", "", "Mount-Point")
 var offset = flag.Int("sbo",512,"Superblock Offset")
+
+var nosync = flag.Bool("nosync", false, "Deactivates synchronous writes")
+
+var trace = flag.Bool("trace", false, "print deep tracing messages")
 
 func main() {
 	// Scans the arg list and sets up flags
@@ -55,8 +62,10 @@ func main() {
 		flag.PrintDefaults()
 		return
 	}
+	dbgpkg.TraceOn = *trace
 	fs := new(fs1.FileSystem)
 	fs.Device = f
+	fs.NoSync = *nosync
 	e = fs.LoadFileSystem(int64(*offset))
 	if e!=nil {
 		fmt.Println("Error: ",e)

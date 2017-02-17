@@ -27,6 +27,8 @@ package fs1drv
 import "github.com/hanwen/go-fuse/fuse"
 import "github.com/hanwen/go-fuse/fuse/nodefs"
 
+//import "github.com/maxymania/anyfs/debug"
+
 import "github.com/maxymania/anyfs/dskimg/fs1"
 import "github.com/maxymania/anyfs/dskimg/ods"
 //import "time"
@@ -140,11 +142,19 @@ func (d *DirNode) Mkdir(name string, mode uint32, context *fuse.Context) (*nodef
 func (d *DirNode) Mknod(name string, mode uint32, dev uint32, context *fuse.Context) (*nodefs.Inode, fuse.Status) {
 	ino := d.Inode()
 	ft := uint8(0)
-	switch mode & syscall.S_IFMT {
+	uft := mode & syscall.S_IFMT
+	switch uft {
 	case fuse.S_IFREG:
 		ft = ods.FT_FILE
 	case fuse.S_IFIFO:
 		ft = ods.FT_FIFO
+	case syscall.S_IFSOCK:
+		mm := new(ModeNode)
+		mm.Node = nodefs.NewDefaultNode()
+		mm.Attr.Mode = mode
+		ci := ino.GetChild(name)
+		if ci!=nil { return nil,fuse.Status(syscall.EEXIST) }
+		return ino.NewChild(name,false,mm),fuse.OK
 	default:
 		return nil,fuse.EINVAL
 	}
@@ -179,7 +189,7 @@ func (d *DirNode) Unlink(name string, context *fuse.Context) fuse.Status {
 	if ent.FileType==ods.FT_DIR { return fuse.Status(syscall.EISDIR) }
 	
 	_,err = d.Dir.Delete(name)
-	if err==nil { return fuse.ENOENT }
+	if err!=nil { return fuse.ENOENT }
 	ino.RmChild(name)
 	
 	mfte,e := d.Backing.FS.MMFT.GetEntry(ent.File_MFT,ent.File_IDX)
@@ -204,7 +214,7 @@ func (d *DirNode) Rmdir(name string, context *fuse.Context) fuse.Status {
 	}
 	
 	_,err = d.Dir.Delete(name)
-	if err==nil { return fuse.ENOENT }
+	if err!=nil { return fuse.ENOENT }
 	
 	mfte,e := d.Backing.FS.MMFT.GetEntry(ent.File_MFT,ent.File_IDX)
 	if e==nil && mfte.Cookie==ent.Cookie {
@@ -237,6 +247,12 @@ func (d *DirNode) rename_in(oldName string, newName string, context *fuse.Contex
 			}
 		}
 		d.Dir.Delete(oldName)
+		return fuse.OK
+	}else{
+		oin := ino.RmChild(oldName)
+		if oin==nil { return fuse.ENOENT }
+		ino.RmChild(newName)
+		ino.AddChild(newName,oin)
 		return fuse.OK
 	}
 	return fuse.ENOENT
@@ -295,7 +311,13 @@ func (d *DirNode) Rename(oldName string, newParent nodefs.Node, newName string, 
 	if !ok { return fuse.EINVAL }
 	if d==target { return d.rename_in(oldName,newName,context) }
 	ino,ent,err := d.move_out_1(oldName)
-	if err!=nil { return fuse.EIO }
+	if err!=nil {
+		oldi := d.Inode().RmChild(oldName)
+		if oldi==nil { return fuse.ENOENT }
+		target.Inode().RmChild(newName)
+		target.Inode().AddChild(newName,oldi)
+		return fuse.OK
+	}
 	st := target.move_into(newName,ent,ino,context)
 	if st.Ok() {
 		d.move_out_2(oldName)
@@ -305,5 +327,53 @@ func (d *DirNode) Rename(oldName string, newParent nodefs.Node, newName string, 
 		return st
 	}
 }
-
+func (d *DirNode) link_ll(name string, ent ods.DirectoryEntryValue) (ok bool,err error){
+	d.Lock.Lock()
+	defer d.Lock.Unlock()
+	_,_,oerr := d.Dir.Search(name)
+	if oerr==io.EOF { return false,nil }
+	err = d.Dir.Add(ods.DirectoryEntry{name,ent})
+	ok = true
+	return
+}
+func (d *DirNode) Link(name string, existing nodefs.Node, context *fuse.Context) (*nodefs.Inode, fuse.Status) {
+	var ent ods.DirectoryEntryValue
+	var mfte *ods.MFTE = nil
+	var e error
+	switch enode := existing.(type) {
+	case *DirNode:
+		if d.Backing.FS != enode.Backing.FS { return nil,fuse.EINVAL }
+		mfte,e = enode.Backing.GetMFTE()
+		if e!=nil { return nil,fuse.EIO }
+	case *FileNode:
+		if d.Backing.FS != enode.Backing.FS { return nil,fuse.EINVAL }
+		mfte,e = enode.Backing.GetMFTE()
+		if e!=nil { return nil,fuse.EIO }
+	case *ReprNode:
+		if d.Backing.FS != enode.Backing.FS { return nil,fuse.EINVAL }
+		mfte,e = enode.Backing.GetMFTE()
+		if e!=nil { return nil,fuse.EIO }
+	case *ModeNode:
+		nm := new(ModeNode)
+		*nm = *enode
+		nm.Node = nodefs.NewDefaultNode()
+		oin := d.Inode().RmChild(name)
+		if oin!=nil { d.Inode().AddChild(name,oin); return nil,fuse.Status(syscall.EEXIST) }
+		return d.Inode().NewChild(name,false,nm),fuse.OK
+	}
+	if mfte!=nil {
+		ent.File_MFT = mfte.File_MFT
+		ent.File_IDX = mfte.File_IDX
+		ent.Cookie   = mfte.Cookie
+		ent.FileType = mfte.FileType
+		ok,err := d.link_ll(name,ent)
+		if err!=nil { return nil,fuse.EIO }
+		if !ok { return nil,fuse.Status(syscall.EEXIST) }
+		d.Backing.FS.Increment(mfte.File_MFT,mfte.File_IDX)
+		dir,nd,st := opennode(d.Backing.FS,ent)
+		if !st.Ok() { return nil,st }
+		return d.Inode().NewChild(name,dir,nd),fuse.OK
+	}
+	return nil,fuse.EINVAL
+}
 

@@ -26,9 +26,12 @@ package fs1
 
 import "os"
 
+import _ "github.com/maxymania/anyfs/dskimg/platform"
+
 import "github.com/maxymania/anyfs/dskimg"
 import "github.com/maxymania/anyfs/dskimg/ods"
 import "github.com/maxymania/anyfs/dskimg/bitmap"
+import "github.com/maxymania/anyfs/debug"
 import "errors"
 import "sync"
 import "math/rand"
@@ -62,10 +65,20 @@ type FileSystem struct{
 	MFTLck  sync.Mutex
 	BitMap  bitmap.BitRegion
 	BMLck   sync.Mutex
+	NoSync  bool
 	Temp    uint32
+	
+	condev  dskimg.IoReaderWriterAt
 }
-
+func (f *FileSystem) initdev(){
+	if f.NoSync {
+		f.condev = f.Device
+	}else{
+		f.condev = &dskimg.SyncFile{f.Device}
+	}
+}
 func (f *FileSystem) Mkfs(i int64, mf *MkfsInfo) error {
+	f.initdev()
 	fif,e := f.Device.Stat()
 	if e!=nil { return e }
 	f.SB = new(ods.Superblock)
@@ -73,6 +86,9 @@ func (f *FileSystem) Mkfs(i int64, mf *MkfsInfo) error {
 	f.SB.BlockSize   = mf.BlockSize
 	f.SB.DiskSerial  = uint64(rand.Int63())
 	f.SB.Block_Len   = uint64(fif.Size())/uint64(mf.BlockSize)
+	debug.Println("fif.Size() = ",fif.Size())
+	debug.Println("mf.BlockSize = ",mf.BlockSize)
+	debug.Println("uint64(",fif.Size(),")/uint64(",mf.BlockSize,") = ",uint64(fif.Size())/uint64(mf.BlockSize))
 	f.SB.Bitmap_BLK,f.SB.Bitmap_LEN = mf.bitmap(i,f.SB.Block_Len)
 	f.SB.DirSegSize  = mf.BlockSize
 	if mf.DirSegSize!=0 { f.SB.DirSegSize = mf.DirSegSize }
@@ -82,7 +98,7 @@ func (f *FileSystem) Mkfs(i int64, mf *MkfsInfo) error {
 		f.SB.DirSegSize = (1<<16)
 	}
 	
-	img := dskimg.NewSectionIo(f.Device,f.SB.Offset(f.SB.Bitmap_BLK),f.SB.Length(f.SB.Bitmap_LEN))
+	img := dskimg.NewSectionIo(f.condev,f.SB.Offset(f.SB.Bitmap_BLK),f.SB.Length(f.SB.Bitmap_LEN))
 	buffer := make([]byte,int(mf.BlockSize))
 	
 	img.Overwrite(buffer)
@@ -95,7 +111,7 @@ func (f *FileSystem) Mkfs(i int64, mf *MkfsInfo) error {
 	_,e = f.BitMap.Apply(buffer,0,endbm+mftblocks,bitmap.SetRange,true)
 	if e!=nil { return e }
 	
-	mft,e := ods.NewMFT(dskimg.NewSectionIo(f.Device,f.SB.Offset(endbm),f.SB.Length(mftblocks)),mf.BlockSize)
+	mft,e := ods.NewMFT(dskimg.NewSectionIo(f.condev,f.SB.Offset(endbm),f.SB.Length(mftblocks)),mf.BlockSize)
 	if e!=nil { return e }
 	mft.Head.MFT_ID  = rand.Uint32()
 	mft.Head.Num_BLK = mf.MftBlocks
@@ -118,16 +134,39 @@ func (f *FileSystem) Mkfs(i int64, mf *MkfsInfo) error {
 		if e!=nil { return e }
 	}
 	
+	debug.Println("SuperBlock = {")
+	debug.Println(" - MagicNumber ",f.SB.MagicNumber)
+	debug.Println(" - BlockSize   ",f.SB.BlockSize)
+	debug.Println(" - DiskSerial  ",f.SB.DiskSerial)
+	debug.Println(" - Block_Len   ",f.SB.Block_Len)
+	debug.Println(" - Bitmap_BLK  ",f.SB.Bitmap_BLK)
+	debug.Println(" - Bitmap_LEN  ",f.SB.Bitmap_LEN)
+	debug.Println(" - FirstMFT    ",f.SB.FirstMFT)
+	debug.Println(" - DirSegSize  ",f.SB.DirSegSize)
+	debug.Println("}")
+	
 	return f.SB.StoreSuperblock(i,f.Device)
 }
 func (f *FileSystem) LoadFileSystem(i int64) error {
+	f.initdev()
 	f.SB = new(ods.Superblock)
 	e := f.SB.LoadSuperblock(i,f.Device)
+	debug.Println("SuperBlock = {")
+	debug.Println(" - MagicNumber ",f.SB.MagicNumber)
+	debug.Println(" - BlockSize   ",f.SB.BlockSize)
+	debug.Println(" - DiskSerial  ",f.SB.DiskSerial)
+	debug.Println(" - Block_Len   ",f.SB.Block_Len)
+	debug.Println(" - Bitmap_BLK  ",f.SB.Bitmap_BLK)
+	debug.Println(" - Bitmap_LEN  ",f.SB.Bitmap_LEN)
+	debug.Println(" - FirstMFT    ",f.SB.FirstMFT)
+	debug.Println(" - DirSegSize  ",f.SB.DirSegSize)
+	debug.Println("}")
+	
 	if e!=nil { return e }
 	if f.SB.MagicNumber != ods.Superblock_MagicNumber { return badmz }
-	f.BitMap.Image = dskimg.NewSectionIo(f.Device,f.SB.Offset(f.SB.Bitmap_BLK),f.SB.Length(f.SB.Bitmap_LEN))
+	f.BitMap.Image = dskimg.NewSectionIo(f.condev,f.SB.Offset(f.SB.Bitmap_BLK),f.SB.Length(f.SB.Bitmap_LEN))
 	
-	img := dskimg.NewSectionIo(f.Device,f.SB.Offset(f.SB.FirstMFT),f.SB.Length(1))
+	img := dskimg.NewSectionIo(f.condev,f.SB.Offset(f.SB.FirstMFT),f.SB.Length(1))
 	mft,e := ods.NewMFT(img,f.SB.BlockSize)
 	if e!=nil { return e }
 	

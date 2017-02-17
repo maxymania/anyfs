@@ -30,6 +30,7 @@ import "github.com/maxymania/anyfs/dskimg/fs1"
 //import _ "github.com/maxymania/anyfs/dskimg/ods"
 import "fmt"
 import "flag"
+import dbgpkg "github.com/maxymania/anyfs/debug"
 
 const (
 	BZ_0 = 1<<iota
@@ -53,8 +54,11 @@ var mom = flag.String("mftord", "K", "M = 'mft size in MB instead of KB';  * = '
 
 var offset = flag.Int("sbo",512,"Superblock Offset")
 
+var trace = flag.Bool("trace", false, "print deep tracing messages")
+
 func main(){
 	flag.Parse()
+	dbgpkg.TraceOn = *trace
 	if *image=="" {
 		flag.PrintDefaults()
 		return
@@ -95,6 +99,7 @@ func main(){
 	mkfs.MftBlocks /= mkfs.BlockSize
 	fs := new(fs1.FileSystem)
 	fs.Device = f
+	fs.NoSync = true /* We don't need auto-FSYNC */
 	err := fs.Mkfs(int64(*offset),mkfs)
 	if err!=nil {
 		fmt.Println("Error: ",err)

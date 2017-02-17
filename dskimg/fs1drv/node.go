@@ -50,15 +50,29 @@ func opennode(fs *fs1.FileSystem, ent ods.DirectoryEntryValue) (bool,nodefs.Node
 		return true,dn,fuse.OK
 		}
 	case ods.FT_FIFO:{
-		mm := new(ModeNode)
+		mm := new(ReprNode)
 		mm.Node = nodefs.NewDefaultNode()
 		mm.Attr.Mode = fuse.S_IFIFO | 0666
-		//attr_now(&(mm.Attr))
+		mm.Backing = file
 		return true,mm,fuse.OK
 		}
 	}
 	return false,nil,fuse.EIO
 }
+
+type ReprNode struct{
+	nodefs.Node
+	Attr fuse.Attr
+	Backing *fs1.File
+}
+
+func (m *ReprNode) GetAttr(out *fuse.Attr, file nodefs.File, context *fuse.Context) (fuse.Status) {
+	*out = m.Attr
+	return fuse.OK
+}
+
+/* Mode-Nodes must be kept in memory in order to reserve their INODE number. */
+func (m *ReprNode) Deletable() bool { return false }
 
 
 type ModeNode struct{

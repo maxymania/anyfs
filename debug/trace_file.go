@@ -93,4 +93,7 @@ func (t *TracerFile) Allocate(off uint64, size uint64, mode uint32) (code fuse.S
 	return
 }
 
-
+func WrapFile(f nodefs.File) nodefs.File {
+	if TraceOn { return &TracerFile{f} }
+	return f
+}

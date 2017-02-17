@@ -27,6 +27,8 @@ package fs1drv
 import "github.com/hanwen/go-fuse/fuse"
 import "github.com/hanwen/go-fuse/fuse/nodefs"
 
+//import "github.com/maxymania/anyfs/debug"
+
 import "github.com/maxymania/anyfs/dskimg/fs1"
 import "os"
 
@@ -74,6 +76,7 @@ func (f *FileNode) Open(flags uint32, context *fuse.Context) (nodefs.File, fuse.
 		fobj = nodefs.NewReadOnlyFile(fobj)
 		//fobj = nodefs.NewDataFile([]byte("Test1\n"))
 	}
+	//fobj = debug.WrapFile(fobj)
 	return fobj,fuse.OK
 }
 func (f *FileNode) Access(mode uint32, context *fuse.Context) (fuse.Status) {
