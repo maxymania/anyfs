@@ -24,58 +24,43 @@
 
 package security
 
-import "fmt"
+type AccessControlList map[SID]AccessControlVector
 
-type SID uint64
-
-const (
-	SID_SPECIAL = 0x11910000
-	SID_UID     = 0x11a10000
-	SID_GID     = 0x11b10000
-	SID_TYPE    = 0x22000000
-)
-const (
-	SIDC_SYSTEM = 0x1191000000000000|iota
-	SIDC_ROOT
-	SIDC_ANY_USER
-)
-
-func LoweUpperSID(low,up uint32) SID {
-	return SID((uint64(low)<<32)|uint64(up))
-}
-func GidSID(gid uint32) SID {
-	return SID(uint64(SID_GID<<32)|uint64(gid))
-}
-func UidSID(uid uint32) SID {
-	return SID(uint64(SID_UID<<32)|uint64(uid))
-}
-func TypeSID(ty uint32) SID {
-	return SID(uint64(SID_TYPE<<32)|uint64(ty))
+type AccessControlEntry struct{
+	Subject SID
+	Rights  AccessControlVector
 }
 
-func (s SID) Upper() uint32 {
-	return uint32(uint64(s)>>32)
-}
-func (s SID) Lower() uint32 {
-	return uint32(uint64(s)&0xffffffff)
-}
-func (s SID) Gid() uint32 {
-	if s.Upper()!= SID_GID { return ^uint32(0) }
-	return s.Lower()
-}
-func (s SID) Uid() uint32 {
-	if s.Upper()!= SID_UID { return ^uint32(0) }
-	return s.Lower()
-}
-func (s SID) String() string{
-	switch s.Upper() {
-	case SID_UID:
-		return fmt.Sprint("uid:",s.Lower())
-	case SID_GID:
-		return fmt.Sprint("gid:",s.Lower())
-	case SID_TYPE:
-		return fmt.Sprint("type:",s.Lower())
+func (a AccessControlList) GetRights(s []SID) AccessControlVector {
+	v := AccessControlVector(0)
+	for _,i := range s {
+		v |= a[i]
 	}
-	return fmt.Sprint("SID:",s.Upper(),"-",s.Lower())
+	return v
 }
+func (a AccessControlList) GetRightsTypeEnforcement(aces []AccessControlEntry) AccessControlVector {
+	v := AccessControlVector(0)
+	for _,ace := range aces {
+		v |= (a[ace.Subject] & ace.Rights)
+	}
+	return v
+}
+func (a AccessControlList) AddEntry(ace AccessControlEntry) {
+	a[ace.Subject] = (a[ace.Subject] | ace.Rights)
+}
+func (a AccessControlList) AddEntries(aces []AccessControlEntry) {
+	for _,ace := range aces {
+		a[ace.Subject] = (a[ace.Subject] | ace.Rights)
+	}
+}
+func (a AccessControlList) GetEntries() (aces []AccessControlEntry) {
+	aces = make([]AccessControlEntry,0,len(a))
+	for sid,acv := range a {
+		if acv==AccessControlVector(0) { continue }
+		aces = append(aces,AccessControlEntry{sid,acv})
+	}
+	return
+}
+
+
 
