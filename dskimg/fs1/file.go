@@ -311,6 +311,9 @@ func (f *File) AsDirectory() (*ods.Directory,error) {
 func (f *File) AsDirectoryLite() *ods.Directory {
 	return ods.NewDirectoryLite(&AutoGrowingFile{f},int(f.FS.SB.DirSegSize))
 }
+func (f *File) GetMDF() (*MetaDataFile,error) {
+	return f.FS.GetMDF(f.MFT,f.FID)
+}
 
 
 type AutoGrowingFile struct{

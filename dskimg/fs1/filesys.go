@@ -35,10 +35,13 @@ import "github.com/maxymania/anyfs/debug"
 import "errors"
 import "sync"
 import "math/rand"
+import "github.com/hashicorp/golang-lru"
 
 var badmz = errors.New("Bad Magic number")
 
 var oor = errors.New("Out of Resources")
+var Enotfound = errors.New("Not found")
+var einvalidfile = errors.New("Invalid file")
 
 const (
 	FS_SPECIAL_ROOT = 1+iota
@@ -57,6 +60,22 @@ func (mf *MkfsInfo) bitmap(i int64, blknum uint64) (blk,lng uint64){
 	return
 }
 
+func join32to64(ii, i uint32) uint64 {
+	return (uint64(ii)<<32)|uint64(i)
+}
+
+func mdfcacheEvict (key interface{},val interface{}) {
+	val.(*MetaDataFile).flush()
+}
+
+func mdfcacheCreate(i int) (*lru.Cache,error) {
+	return lru.NewWithEvict(i,mdfcacheEvict)
+}
+
+type initialFile struct{
+	FileType  uint8
+	File_IDX  uint32
+}
 
 type FileSystem struct{
 	Device *os.File
@@ -69,6 +88,9 @@ type FileSystem struct{
 	Temp    uint32
 	
 	condev  dskimg.IoReaderWriterAt
+	
+	mdfsync  sync.Mutex
+	mdfcache *lru.Cache
 }
 func (f *FileSystem) initdev(){
 	if f.NoSync {
@@ -80,6 +102,8 @@ func (f *FileSystem) initdev(){
 func (f *FileSystem) Mkfs(i int64, mf *MkfsInfo) error {
 	f.initdev()
 	fif,e := f.Device.Stat()
+	if e!=nil { return e }
+	f.mdfcache,e = mdfcacheCreate(1024)
 	if e!=nil { return e }
 	f.SB = new(ods.Superblock)
 	f.SB.MagicNumber = ods.Superblock_MagicNumber
@@ -125,13 +149,28 @@ func (f *FileSystem) Mkfs(i int64, mf *MkfsInfo) error {
 	
 	f.Temp = mft.Head.MFT_ID
 	
-	{
-		mfte := f.MMFT.CreateEntry(f.Temp,FS_SPECIAL_ROOT)
-		mfte.FileType = ods.FT_DIR
+	initialFiles := [...]initialFile{
+		initialFile{FS_SPECIAL_ROOT,ods.FT_DIR},
+	}
+	
+	for _,inf := range initialFiles {
+		mfte := f.MMFT.CreateEntry(f.Temp,inf.File_IDX)
+		mfte.FileType = inf.FileType
 		mfte.RefCount = 10000000
 		
 		e := f.MMFT.PutEntry(mfte)
 		if e!=nil { return e }
+	}
+	
+	for _,inf := range initialFiles {
+		mfe,e := f.CreateFileLL(ods.FT_METADATA,nil)
+		if e!=nil { continue }
+		e = f.setMetadataFile_Or_Shred(f.Temp,inf.File_IDX,mfe)
+		if e!=nil { continue }
+		mdf,e := f.getMDF(f.Temp,inf.File_IDX)
+		if e!=nil { continue }
+		
+		mdf.initialContent()
 	}
 	
 	debug.Println("SuperBlock = {")
@@ -163,6 +202,9 @@ func (f *FileSystem) LoadFileSystem(i int64) error {
 	debug.Println("}")
 	
 	if e!=nil { return e }
+	f.mdfcache,e = mdfcacheCreate(1024)
+	if e!=nil { return e }
+	
 	if f.SB.MagicNumber != ods.Superblock_MagicNumber { return badmz }
 	f.BitMap.Image = dskimg.NewSectionIo(f.condev,f.SB.Offset(f.SB.Bitmap_BLK),f.SB.Length(f.SB.Bitmap_LEN))
 	
@@ -195,6 +237,20 @@ func (f *FileSystem) GetRootDir() *File {
  * 'ft' must be one of FT_FILE, FT_DIR, FT_FIFO
  */
 func (f *FileSystem) CreateFile(ft uint8) (*File,error) {
+	mfe,e := f.CreateFileLL(ods.FT_METADATA,nil)
+	if e!=nil { return nil,e }
+	mfte,e := mfe.GetMFTE()
+	if e!=nil {
+		f.shred(mfe.MFT,mfe.FID)
+		return nil,e
+	}
+	fl,e := f.CreateFileLL(ft,mfte)
+	if e!=nil {
+		f.shred(mfe.MFT,mfe.FID)
+	}
+	return fl,e
+}
+func (f *FileSystem) CreateFileLL(ft uint8, mdf_e *ods.MFTE) (*File,error) {
 	f.MFTLck.Lock()
 	defer f.MFTLck.Unlock()
 	retries := 32
@@ -212,10 +268,36 @@ func (f *FileSystem) CreateFile(ft uint8) (*File,error) {
 	mfte.FileType = ft
 	mfte.Cookie = uint64(rand.Int63())
 	mfte.RefCount = 1
+	if mdf_e!=nil {
+		mfte.Mdf_MFT    = mdf_e.File_MFT
+		mfte.Mdf_IDX    = mdf_e.File_IDX
+		mfte.Mdf_Cookie = uint16(mdf_e.Cookie&0xffff)
+	}
 	e = f.MMFT.PutEntry(mfte)
 	if e!=nil { return nil,e }
 	return &File{f,mfte.File_MFT,mfte.File_IDX},nil
 }
+func (f *FileSystem) setMetadataFile_Or_Shred(ii, i uint32, mfe *File) error {
+	e := f.setMetadataFile(ii,i,mfe)
+	if e!=nil {
+		f.shred(mfe.MFT,mfe.FID)
+	}
+	return e
+}
+func (f *FileSystem) setMetadataFile(ii, i uint32, mfe *File) error {
+	f.MFTLck.Lock()
+	defer f.MFTLck.Unlock()
+	mfte,e := f.MMFT.GetEntry(ii,i)
+	if e!=nil { return e }
+	mfte2,e := mfe.GetMFTE()
+	if e!=nil { return e }
+	mfte.Mdf_MFT    = mfte2.File_MFT
+	mfte.Mdf_IDX    = mfte2.File_IDX
+	mfte.Mdf_Cookie = uint16(mfte2.Cookie&0xffff)
+	f.MMFT.PutEntry(mfte)
+	return e
+}
+
 func (f *FileSystem) shred(ii,i uint32) error {
 	gec,e := f.MMFT.GetEntryChain(ii,i)
 	if e!=nil { return e }
@@ -228,15 +310,31 @@ func (f *FileSystem) shred(ii,i uint32) error {
 	}
 	return err
 }
+
 func (f *FileSystem) Decrement(ii,i uint32) error{
 	f.MFTLck.Lock()
 	defer f.MFTLck.Unlock()
+	mfte_copy := new(ods.MFTE)
+	e := f.internalDecrement(ii,i,mfte_copy)
+	if e!=nil { return e }
+	if mfte_copy.Mdf_IDX==0 { return nil } /* No Metadata File */
+	
+	mfte2,e := f.MMFT.GetEntry(mfte_copy.Mdf_MFT,mfte_copy.Mdf_IDX)
+	
+	if e!=nil { return nil } /* Cannot read Metadata File. Gone? */
+	
+	if uint16(mfte2.Cookie&0xffff)!=mfte_copy.Mdf_Cookie { return nil }
+	
+	return f.internalDecrement(mfte_copy.Mdf_MFT,mfte_copy.Mdf_IDX,mfte_copy)
+}
+func (f *FileSystem) internalDecrement(ii,i uint32, mfte_copy *ods.MFTE) error{
 	mfte,e := f.MMFT.GetEntry(ii,i)
 	if e!=nil { return e }
 	mfte.RefCount--
 	e = f.MMFT.PutEntry(mfte)
 	if e!=nil { return e }
 	if mfte.RefCount!=0 { return nil }
+	*mfte_copy = *mfte /* Copy MFT Entry, if Delete */
 	return f.shred(ii,i)
 }
 func (f *FileSystem) Increment(ii,i uint32) error{
@@ -247,6 +345,34 @@ func (f *FileSystem) Increment(ii,i uint32) error{
 	mfte.RefCount++
 	e = f.MMFT.PutEntry(mfte)
 	return e
+}
+
+
+func (f *FileSystem) GetMDF(ii, i uint32) (*MetaDataFile,error) {
+	f.mdfsync.Lock()
+	defer f.mdfsync.Unlock()
+	key := join32to64(ii,i)
+	rawmdf,ok := f.mdfcache.Get(key)
+	if ok { return rawmdf.(*MetaDataFile),nil }
+	mdf,err := f.getMDF(ii,i)
+	if err==nil {
+		f.mdfcache.Add(key,mdf)
+	}
+	return mdf,err
+}
+func (f *FileSystem) getMDF(ii, i uint32) (*MetaDataFile,error) {
+	mfte,e := f.MMFT.GetEntry(ii,i)
+	if ods.MFT_IsFileNotFound(e) { return nil,Enotfound }
+	if e!=nil { return nil,e }
+	f.MMFT.GetEntry(ii,i)
+	if mfte.Mdf_IDX==0 { return nil,Enotfound }
+	mfte2,e := f.MMFT.GetEntry(mfte.Mdf_MFT,mfte.Mdf_IDX)
+	if e!=nil { return nil,e }
+	if uint16(mfte2.Cookie&0xffff)!=mfte.Mdf_Cookie { return nil,einvalidfile }
+	mdf := new(MetaDataFile)
+	e = mdf.init(f,ii,i)
+	if e!=nil { return nil,e }
+	return mdf,nil
 }
 
 

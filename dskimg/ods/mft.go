@@ -261,6 +261,10 @@ func MFT_IsAllocFail(e error) bool {
 	return e==allocmfte
 }
 
+func MFT_IsFileNotFound(e error) bool {
+	return e==cormfte
+}
+
 type MMFT struct{
 	Mutex sync.Mutex
 	MftByID map[uint32]*MFT
